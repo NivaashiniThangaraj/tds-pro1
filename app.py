@@ -594,6 +594,9 @@ def parse_llm_response(response):
             "answer": "Error parsing the response from the language model.",
             "links": []
         }
+@app.get("/")
+def root():
+    return {"message": "TDS Virtual TA API is running. Use POST /api to query."}
 
 @app.post("/api", response_model=QueryResponse)
 async def query_api(request: QueryRequest):
