@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import traceback
 from dotenv import load_dotenv
-
+load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = "knowledge_base.db"
 SIMILARITY_THRESHOLD = 0.68  # Lowered threshold for better recall
 MAX_RESULTS = 10  # Increased to get more context
-load_dotenv()
+
 MAX_CONTEXT_CHUNKS = 4  # Increased number of chunks per source
 API_KEY = os.getenv("API_KEY")  # Get API key from environment variable
 
@@ -595,94 +595,44 @@ def parse_llm_response(response):
             "links": []
         }
 
-# Define API routes
-@app.post("/query")
-async def query_knowledge_base(request: QueryRequest):
+@app.post("/api", response_model=QueryResponse)
+async def query_api(request: QueryRequest):
     try:
-        # Log the incoming request
-        logger.info(f"Received query request: question='{request.question[:50]}...', image_provided={request.image is not None}")
-        
+        logger.info(f"Received query: {request.question[:50]}..., image_provided={request.image is not None}")
+
         if not API_KEY:
-            error_msg = "API_KEY environment variable not set"
-            logger.error(error_msg)
-            return JSONResponse(
-                status_code=500,
-                content={"error": error_msg}
-            )
-            
+            raise HTTPException(status_code=500, detail="API_KEY environment variable not set")
+
         conn = get_db_connection()
-        
         try:
-            # Process the query (handle text and optional image)
-            logger.info("Processing query and generating embedding")
-            query_embedding = await process_multimodal_query(
-                request.question,
-                request.image
-            )
-            
-            # Find similar content
-            logger.info("Finding similar content")
+            query_embedding = await process_multimodal_query(request.question, request.image)
             relevant_results = await find_similar_content(query_embedding, conn)
-            
+
             if not relevant_results:
-                logger.info("No relevant results found")
-                return {
-                    "answer": "I couldn't find any relevant information in my knowledge base.",
-                    "links": []
-                }
-            
-            # Enrich results with adjacent chunks for better context
-            logger.info("Enriching results with adjacent chunks")
+                return QueryResponse(answer="I couldn't find any relevant information in my knowledge base.", links=[])
+
             enriched_results = await enrich_with_adjacent_chunks(conn, relevant_results)
-            
-            # Generate answer
-            logger.info("Generating answer")
             llm_response = await generate_answer(request.question, enriched_results)
-            
-            # Parse the response
-            logger.info("Parsing LLM response")
-            result = parse_llm_response(llm_response)
-            
-            # If links extraction failed, create them from the relevant results
-            if not result["links"]:
-                logger.info("No links extracted, creating from relevant results")
-                # Create a dict to deduplicate links from the same source
-                links = []
+            parsed = parse_llm_response(llm_response)
+
+            # Fill fallback links if missing
+            if not parsed["links"]:
                 unique_urls = set()
-                
-                for res in relevant_results[:5]:  # Use top 5 results
-                    url = res["url"]
-                    if url not in unique_urls:
-                        unique_urls.add(url)
-                        snippet = res["content"][:100] + "..." if len(res["content"]) > 100 else res["content"]
-                        links.append({"url": url, "text": snippet})
-                
-                result["links"] = links
-            
-            # Log the final result structure (without full content for brevity)
-            logger.info(f"Returning result: answer_length={len(result['answer'])}, num_links={len(result['links'])}")
-            
-            # Return the response in the exact format required
-            return result
-        except Exception as e:
-            error_msg = f"Error processing query: {e}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            return JSONResponse(
-                status_code=500,
-                content={"error": error_msg}
-            )
+                links = []
+                for res in relevant_results[:5]:
+                    if res["url"] not in unique_urls:
+                        unique_urls.add(res["url"])
+                        snippet = res["content"][:100] + "..."
+                        links.append(LinkInfo(url=res["url"], text=snippet))
+                parsed["links"] = links
+
+            return QueryResponse(answer=parsed["answer"], links=parsed["links"])
+
         finally:
             conn.close()
     except Exception as e:
-        # Catch any exceptions at the top level
-        error_msg = f"Unhandled exception in query_knowledge_base: {e}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"error": error_msg}
-        )
+        logger.error("Error in /api route", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Health check endpoint
 @app.get("/health")
@@ -724,5 +674,3 @@ async def health_check():
             content={"status": "unhealthy", "error": str(e), "api_key_set": bool(API_KEY)}
         )
 
-if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
